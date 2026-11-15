@@ -1,5 +1,5 @@
 import * as ChordSheetJS from 'chordsheetjs';
-import { chordTokens, cleanChordName, lineRanges } from './chordTokens';
+import { chordTokens, cleanChordName, insideTab, lineRanges } from './chordTokens';
 import { detectFormat, SECTION_LABEL_RE } from './chords';
 
 export type ChordProblemCode = 'unclosed' | 'unknown' | 'unmatchedStart' | 'unmatchedEnd';
@@ -68,8 +68,11 @@ function sectionProblems(lines: { text: string; from: number }[]): ChordProblem[
 export function chordProblems(text: string): ChordProblem[] {
   if (SKIPPED_FORMATS.includes(detectFormat(text) ?? '')) return [];
   const lines = lineRanges(text);
+  // Tab text is kept as written, so brackets in it are not chords to check.
+  const tab = insideTab(lines.map((l) => l.text));
   return [
-    ...lines.flatMap(({ text: line, from: start }) => [...bracketProblems(line, start), ...chordNameProblems(line, start)]),
+    ...lines.flatMap(({ text: line, from: start }, i) =>
+      tab[i] ? [] : [...bracketProblems(line, start), ...chordNameProblems(line, start)]),
     ...sectionProblems(lines),
   ].sort((a, b) => a.from - b.from);
 }

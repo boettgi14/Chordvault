@@ -1,14 +1,23 @@
 import { startCompletion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
 import type { Command } from '@codemirror/view';
-import { chordAt } from './chordTokens';
+import { chordAt, insideTab } from './chordTokens';
 import { suggestChords } from './chordSuggestions';
 
 const MAX_BOOST = 99;
 
+/** Whether the cursor's line is tab text, where a bracket is not a chord. */
+function inTabAt(context: CompletionContext): boolean {
+  const { doc } = context.state;
+  const lineNo = doc.lineAt(context.pos).number;
+  const lines: string[] = [];
+  for (let n = 1; n <= lineNo; n++) lines.push(doc.line(n).text);
+  return insideTab(lines)[lineNo - 1];
+}
+
 /** Suggests chord names while the cursor is inside `[...]`, closed or not. */
 export function chordCompletionSource(context: CompletionContext): CompletionResult | null {
   const before = context.matchBefore(/\[[^\]\s[]*$/);
-  if (!before) return null;
+  if (!before || inTabAt(context)) return null;
   const after = /^[^\]\s[]*/.exec(context.state.sliceDoc(context.pos, context.state.doc.lineAt(context.pos).to))![0];
   const names = suggestChords(context.state.doc.toString());
   return {

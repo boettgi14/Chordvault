@@ -3,7 +3,7 @@ import type { jsPDF } from 'jspdf';
 
 type PdfConfig = NonNullable<ConstructorParameters<typeof PdfFormatter>[0]>;
 
-type FontSpec = { name?: string; size?: number; color?: string | number };
+type FontSpec = { name?: string; style?: string; size?: number; color?: string | number };
 type StyledItem = { style?: FontSpec };
 
 // One step on ChordVault's -3..+5 scale is one point.
@@ -16,7 +16,11 @@ const defaults = new PdfFormatter().configuration;
 
 const scaled = (size: number, delta: number) => Math.max(MIN_PT, size + delta);
 
-function buildFonts(fontName: string | null, delta: number) {
+// Tab lines reach the formatter as comments; a monospaced face keeps their strings lined up.
+// Courier is a PDF standard font, so nothing has to be embedded for it.
+const MONO_FONT = { name: 'courier', style: 'normal' };
+
+function buildFonts(fontName: string | null, delta: number, monoComments: boolean) {
   const out: Record<string, FontSpec> = {};
   for (const [section, font] of Object.entries(defaults.fonts)) {
     const spec: FontSpec = { size: scaled((font as { size: number }).size, delta) };
@@ -24,6 +28,7 @@ function buildFonts(fontName: string | null, delta: number) {
     out[section] = spec;
   }
   out.chord = { ...out.chord, size: out.text.size, color: '#8e3f3b' };
+  if (monoComments) out.comment = { ...out.comment, ...MONO_FONT };
   return out;
 }
 
@@ -62,11 +67,14 @@ export function buildPdfConfig({
   fontSize,
   headerText,
   doc,
+  monoComments = false,
 }: {
   fontName: string | null;
   fontSize: number;
   headerText?: string[];
   doc?: jsPDF;
+  /** Set comments in Courier: the song has tab lines and every comment is plain ASCII. */
+  monoComments?: boolean;
 }): PdfConfig {
   // The stock templates assume metadata ChordVault often lacks and leave the
   // literal text behind when it is absent: "Key of G - BPM  - Time", and a bare
@@ -84,7 +92,7 @@ export function buildPdfConfig({
 
   return {
     normalizeChords: false,
-    fonts: buildFonts(fontName, fontSize),
+    fonts: buildFonts(fontName, fontSize, monoComments),
     layout: {
       header: layoutHeader,
       footer: { ...defaults.layout.footer, content: [] },

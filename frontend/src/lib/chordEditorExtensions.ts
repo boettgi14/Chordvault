@@ -12,7 +12,13 @@ import { search, searchKeymap } from '@codemirror/search';
 
 const cvTheme = EditorView.theme({
   // --cm-end-space (editor.css) leaves room on touch screens to scroll the last line above the on-screen keyboard.
-  '.cm-content': { padding: '12px 0 var(--cm-end-space, 12px)', minHeight: '300px' },
+  // No ligatures: JetBrains Mono would join "|-" and "-|" in pasted tabs into box-drawing glyphs.
+  '.cm-content': {
+    padding: '12px 0 var(--cm-end-space, 12px)',
+    minHeight: '300px',
+    fontVariantLigatures: 'none',
+    fontFeatureSettings: '"calt" 0, "liga" 0',
+  },
   '.cm-focused': { outline: 'none' },
   '.cm-scroller': { overflow: 'auto' },
   '.cm-gutters': { display: 'none' },

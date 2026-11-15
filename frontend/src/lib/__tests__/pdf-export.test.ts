@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import { resolve } from 'node:path';
-import { exportSongPdf, exportSetlistPdf } from '../pdf-export';
+import * as ChordSheetJS from 'chordsheetjs';
+import { exportSongPdf, exportSetlistPdf, tabsForPdf } from '../pdf-export';
+import { prepareSong } from '../chords';
 import { PDFDocument } from 'pdf-lib';
 import type { Setlist, SetlistEntry } from '../../types/setlist';
 
@@ -11,7 +13,7 @@ const FONT = resolve(process.cwd(), 'src/assets/NotoSansTC.ttf');
 // Pull the drawn text back out of the PDF. Text is written as Identity-H glyph
 // ids, so it has to be mapped back through the font's ToUnicode CMap — which is
 // exactly what a PDF reader does when you select and copy.
-function textRuns(bytes: Uint8Array) {
+function inflatedStreams(bytes: Uint8Array) {
   const buf = Buffer.from(bytes);
   const raw = buf.toString('latin1');
   const streams: string[] = [];
@@ -27,6 +29,11 @@ function textRuns(bytes: Uint8Array) {
       /* not a deflate stream */
     }
   }
+  return streams;
+}
+
+function textRuns(bytes: Uint8Array) {
+  const streams = inflatedStreams(bytes);
   const map: Record<string, string> = {};
   for (const s of streams) {
     for (const block of s.matchAll(/beginbfchar([\s\S]*?)endbfchar/g))
@@ -211,5 +218,57 @@ describe('exportSetlistPdf', () => {
     const entries = [entry(1), entry(2, { content: '{key: G}\n[G]안녕\n' })];
     const missing = await exportSetlistPdf(setlist(entries), { nashville: false, fontSize: 0 });
     expect(missing.length).toBeGreaterThan(0);
+  });
+});
+
+const TAB = ['e|-----0---3---|', 'B|---1---0-----|'];
+const tabSong = (comment = '') =>
+  `{title: Riff}\n{key: G}\n${comment}\n[G]Some [C]words\n\n{start_of_tab: Intro}\n${TAB.join('\n')}\n{end_of_tab}\n`;
+// Courier is a standard font: its text is written as plain (string) Tj, not as glyph ids.
+const courierLines = (bytes: Uint8Array) =>
+  inflatedStreams(bytes).flatMap((s) => [...s.matchAll(/\(([^)]*)\) Tj/g)].map((m) => m[1]));
+// jsPDF writes its font objects uncompressed.
+const usesCourier = async (bytes: Uint8Array) => Buffer.from(bytes).toString('latin1').includes('/BaseFont /Courier');
+
+describe('tab sections in PDF exports', () => {
+  it('turns tab lines into comments and leaves the rest alone', () => {
+    const prepared = prepareSong(tabSong(), 0, false)!;
+    const { song: out, monoComments } = tabsForPdf(prepared);
+    expect(monoComments).toBe(true);
+    const items = out.paragraphs.flatMap((p) => p.lines.flatMap((l) => l.items));
+    expect(items.some((it) => it instanceof ChordSheetJS.Literal)).toBe(false);
+    expect(items.filter((it) => it instanceof ChordSheetJS.Tag && it.isComment()).map((it) => (it as ChordSheetJS.Tag).value)).toEqual(TAB);
+  });
+
+  it('leaves a song without tabs as it is', () => {
+    const prepared = prepareSong('{key: G}\n{comment: Slowly}\n[G]Words\n', 0, false)!;
+    expect(tabsForPdf(prepared)).toEqual({ song: prepared, monoComments: false });
+  });
+
+  it('draws tab lines in Courier', async () => {
+    await exportSongPdf(song(tabSong()), opts);
+    const bytes = await lastPdf();
+    expect(await usesCourier(bytes)).toBe(true);
+    expect(courierLines(bytes)).toEqual(expect.arrayContaining(TAB));
+    expect(textOf(bytes)).toContain('Intro');
+  });
+
+  it('keeps tab lines unchanged when transposing', async () => {
+    await exportSongPdf(song(tabSong()), { ...opts, transpose: 2 });
+    expect(courierLines(await lastPdf())).toEqual(expect.arrayContaining(TAB));
+  });
+
+  it('keeps the song font for comments Courier cannot draw', async () => {
+    await exportSongPdf(song(tabSong('{comment: 慢慢地}')), opts);
+    const bytes = await lastPdf();
+    expect(await usesCourier(bytes)).toBe(false);
+    const text = textOf(bytes);
+    expect(text).toContain('慢慢地');
+    for (const line of TAB) expect(text).toContain(line);
+  });
+
+  it('does not use Courier for a song without tabs', async () => {
+    await exportSongPdf(song('{key: G}\n{comment: Slowly}\n[G]Words\n'), opts);
+    expect(await usesCourier(await lastPdf())).toBe(false);
   });
 });

@@ -12,6 +12,30 @@ export interface ChordToken {
 export const CHORD_TOKEN = /\[[^[\]\n]*\]/;
 export const SECTION_DIRECTIVE = /\{(start_of_|end_of_)?(verse|chorus|bridge|tab|grid|intro|outro)[^}]*\}/i;
 
+/** A line opening a tab block: {start_of_tab}, {start_of_tab: Intro}, {sot}. */
+export const TAB_START = /^\s*\{(?:start_of_tab|sot)(?:[:\s][^}]*)?\}\s*$/i;
+/** A line closing a tab block: {end_of_tab}, {eot}. */
+export const TAB_END = /^\s*\{(?:end_of_tab|eot)\}\s*$/i;
+
+/**
+ * For each line, whether it is tab text: between {start_of_tab} and {end_of_tab}, the
+ * directives themselves excluded. An unclosed block runs to the end, as it does when parsed.
+ */
+export function insideTab(lines: readonly string[]): boolean[] {
+  let open = false;
+  return lines.map((line) => {
+    if (open && TAB_END.test(line)) {
+      open = false;
+      return false;
+    }
+    if (!open && TAB_START.test(line)) {
+      open = true;
+      return false;
+    }
+    return open;
+  });
+}
+
 export function chordTokens(text: string, offset = 0): ChordToken[] {
   return [...text.matchAll(new RegExp(CHORD_TOKEN.source, 'g'))].map((m) => ({
     from: offset + m.index,

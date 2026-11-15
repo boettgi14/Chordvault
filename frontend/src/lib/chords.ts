@@ -1,7 +1,7 @@
 import * as ChordSheetJS from 'chordsheetjs';
 import { escHtml } from './util';
 import { normalizeKey, normalizeChord } from './keys';
-import { CHORD_TOKEN, cleanChordName } from './chordTokens';
+import { CHORD_TOKEN, TAB_END, TAB_START, cleanChordName } from './chordTokens';
 import { extractDirective } from '../../../shared/chordpro.mjs';
 import type { SetlistEntry, SetlistPreferences } from '../types';
 
@@ -24,6 +24,92 @@ const SECTION_NAMES = 'Verse|Chorus|Bridge|Intro|Outro|Interlude|Pre[- ]?Chorus|
 export const SECTION_LABEL_RE = new RegExp(`^\\[?(?:${SECTION_NAMES})\\s*\\d*:?\\]?$`, 'i');
 
 export { extractDirective };
+
+// ─── Tab blocks ─────────────────────────────────────────────────────
+// The Ultimate Guitar and chords-over-lyrics parsers read a tab line that starts with
+// a string name (B|---, G|---) as chords and split it up, and they ignore {start_of_tab}.
+// So tab blocks are swapped for a placeholder before parsing and put back afterwards.
+
+// Optional string name, a bar or colon, then only fret numbers, bars, dashes and
+// technique marks (hammer-on, pull-off, bend, release, slide, mute, vibrato...).
+const TAB_LINE_RE = /^\s*(?:[A-Ga-g][#b]?\s*)?[|:-][-\d|:hpbrstxv/\\~^().=*<>\s]*$/;
+// Three dashes keep chord charts such as "| G | C | D |" out.
+const isTabLine = (line: string) => TAB_LINE_RE.test(line) && (line.match(/-/g)?.length ?? 0) >= 3;
+const SECTION_START_RE = /^\s*\{(?:start_of_\w+|so[cvb])\b[^}]*\}\s*$/i;
+const SECTION_END_RE = /^\s*\{(?:end_of_\w+|eo[cvb])\}\s*$/i;
+// A heading straight above a tab names it: "[Tab]", "Solo:", "[Intro]".
+const TAB_LABEL_RE = new RegExp(`^\\s*\\[?((?:${SECTION_NAMES}|Tabs?|Riff)\\s*\\d*)\\s*:?\\]?\\s*$`, 'i');
+const TAB_WORD_RE = /^tabs?$/i;
+const UG_TAB_CLOSE_RE = /^\s*\[\/tab\]\s*$/i;
+const PLACEHOLDER = (i: number) => `@@chordvault-tab-${i}@@`;
+const PLACEHOLDER_RE = /^@@chordvault-tab-(\d+)@@$/;
+
+function tabBlock(label: string | null, lines: string[]): string {
+  const start = label && !TAB_WORD_RE.test(label) ? `{start_of_tab: ${label}}` : '{start_of_tab}';
+  return [start, ...lines, '{end_of_tab}'].join('\n');
+}
+
+/**
+ * Replaces every tab block with a placeholder paragraph. Explicit {start_of_tab} blocks
+ * are kept as written; runs of two or more tab lines outside a section become one,
+ * taking a heading straight above them as their label.
+ */
+export function maskTabs(content: string): { masked: string; blocks: string[] } {
+  const lines = content.split('\n');
+  const out: string[] = [];
+  const blocks: string[] = [];
+  const placehold = (block: string) => {
+    out.push('', PLACEHOLDER(blocks.length), '');
+    blocks.push(block);
+  };
+  let inSection = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (TAB_START.test(line)) {
+      const end = lines.findIndex((l, j) => j > i && TAB_END.test(l));
+      if (end === -1) { out.push(line); continue; }
+      placehold(lines.slice(i, end + 1).join('\n'));
+      i = end;
+      continue;
+    }
+
+    if (!inSection && isTabLine(line) && i + 1 < lines.length && isTabLine(lines[i + 1])) {
+      let end = i;
+      while (end + 1 < lines.length && isTabLine(lines[end + 1])) end++;
+      const run = lines.slice(i, end + 1).map(l => l.replace(/\s+$/, ''));
+      const heading = out.length ? TAB_LABEL_RE.exec(out[out.length - 1]) : null;
+      if (heading) out.pop();
+      placehold(tabBlock(heading ? heading[1].trim() : null, run));
+      i = end;
+      if (i + 1 < lines.length && UG_TAB_CLOSE_RE.test(lines[i + 1])) i++;
+      continue;
+    }
+
+    if (SECTION_START_RE.test(line)) inSection = true;
+    else if (SECTION_END_RE.test(line)) inSection = false;
+    out.push(line);
+  }
+  return { masked: out.join('\n'), blocks };
+}
+
+/** Puts the tab blocks back in place of their placeholders. */
+export function unmaskTabs(text: string, blocks: string[]): string {
+  if (!blocks.length) return text;
+  return text.split('\n').map(line => {
+    const m = PLACEHOLDER_RE.exec(line.trim());
+    return m ? blocks[Number(m[1])] ?? line : line;
+  }).join('\n');
+}
+
+/** Gives a song parsed from masked text its tab blocks back as real tab sections. */
+function restoreTabs(song: ChordSheetJS.Song, blocks: string[]): ChordSheetJS.Song {
+  if (!blocks.length) return song;
+  const chordPro = new ChordSheetJS.ChordProFormatter({ normalizeChords: false } as Record<string, unknown>).format(song);
+  // The blank lines kept around each placeholder can double up with the song's own.
+  return new ChordSheetJS.ChordProParser().parse(unmaskTabs(chordPro, blocks).replace(/\n{3,}/g, '\n\n'));
+}
 
 export function updateDirective(content: string, name: string, value: string | null): string {
   const re = new RegExp(`^[ \\t]*\\{${name}:.*\\}[ \\t]*$`, 'im');
@@ -57,10 +143,14 @@ export function updateDirective(content: string, name: string, value: string | n
 }
 
 export function parseSongAutoWithFormat(rawContent: string): { song: ChordSheetJS.Song; format: string | null } | null {
+  // Tab blocks are set aside first, so neither the format detection nor the chord
+  // clean-up below ever reads a string name like "B|---" as a chord.
+  const { masked, blocks } = maskTabs(rawContent);
+
   // Pre-process content: force all chords to preferred enharmonic spellings (Sharps)
   // and fix spacing issues in slash chords (e.g. [A / C#] -> [A/C#]) BEFORE parsing.
   // This ensures transpose and Nashville work correctly.
-  let content = rawContent.replace(new RegExp(CHORD_TOKEN.source, 'g'), (chord) => `[${cleanChordName(chord.slice(1, -1))}]`);
+  let content = masked.replace(new RegExp(CHORD_TOKEN.source, 'g'), (chord) => `[${cleanChordName(chord.slice(1, -1))}]`);
 
   // Also normalize Chords-over-lyrics format (lines with only chords)
   content = content.split('\n').map(line => {
@@ -86,10 +176,16 @@ export function parseSongAutoWithFormat(rawContent: string): { song: ChordSheetJ
   const isChordPro = hasBracketChords || (hasDirectives && !hasChordsOverLyrics);
   const order = isChordPro ? [0, 1, 2] : [1, 2, 0];
 
+  // ChordPro understands {start_of_tab} itself, so it gets the blocks back as text.
+  // The other two parsers get the placeholders and the blocks are restored afterwards.
+  const chordProContent = unmaskTabs(content, blocks);
+
   for (const idx of order) {
     const p = PARSERS[idx];
     try {
-      const song = p.make().parse(content);
+      const isChordProParser = p.label === 'ChordPro';
+      const parsed = p.make().parse(isChordProParser ? chordProContent : content);
+      const song = isChordProParser ? parsed : restoreTabs(parsed, blocks);
       const hasChords = song.paragraphs.some((par) =>
         par.lines.some((l) =>
           l.items.some((it) => {
@@ -106,7 +202,7 @@ export function parseSongAutoWithFormat(rawContent: string): { song: ChordSheetJ
 
   // Fallback: parse as ChordPro (lyrics only, no chords detected)
   try {
-    return { song: new ChordSheetJS.ChordProParser().parse(content), format: null };
+    return { song: new ChordSheetJS.ChordProParser().parse(chordProContent), format: null };
   } catch { /* fall through */ }
   return null;
 }
@@ -221,6 +317,15 @@ const typeHeading = (type: string) => type.split('_').map(w => w.charAt(0).toUpp
 
 const labelRow = (label: string) => `<div class="row"><h3 class="label">${escHtml(label)}</h3></div>`;
 
+/**
+ * Verbatim text of a line ChordSheetJS keeps as-is ({start_of_tab} and other literal
+ * sections), else null. Those lines hold Literal items, which have no lyrics or chords.
+ */
+function literalText(l: ChordSheetJS.Line): string | null {
+  if (!l.items.some(it => it instanceof ChordSheetJS.Literal)) return null;
+  return l.items.map(it => (it instanceof ChordSheetJS.Literal ? it.string : '')).join('');
+}
+
 class ResponsiveHtmlFormatter {
   format(song: ChordSheetJS.Song): string {
     return song.paragraphs.map(p => this.renderParagraph(p)).join('');
@@ -234,7 +339,8 @@ class ResponsiveHtmlFormatter {
 
     // The paragraph must have content, which prevents empty badges for metadata
     const hasRenderableContent = p.lines.some(l =>
-      l.items.some(it => ('lyrics' in it && it.lyrics?.trim()) || ('chords' in it && it.chords?.trim()))
+      l.items.some(it => ('lyrics' in it && it.lyrics?.trim()) || ('chords' in it && it.chords?.trim())
+        || (it instanceof ChordSheetJS.Literal && it.string.trim()))
     );
     const heading = !UNTYPED.includes(type) && !content.includes('class="label"') && hasRenderableContent
       ? labelRow(p.label || typeHeading(type)) : '';
@@ -243,6 +349,11 @@ class ResponsiveHtmlFormatter {
   }
 
   private renderLine(l: ChordSheetJS.Line): string {
+    // Tab lines keep their exact spacing, so they get a monospaced block of their own
+    // rather than chord/lyric columns.
+    const literal = literalText(l);
+    if (literal !== null) return `<pre class="literal">${escHtml(literal)}</pre>`;
+
     const comment = commentText(l);
     const label = lineLabel(l, comment);
     if (label !== null) return labelRow(label);

@@ -75,3 +75,16 @@ describe('buildPdfConfig', () => {
     expect(buildPdfConfig({ fontName: null, fontSize: 0 }).layout?.chordDiagrams?.enabled).toBe(false);
   });
 });
+
+describe('buildPdfConfig monoComments', () => {
+  it('sets comments in Courier, keeping their scaled size', () => {
+    const cfg = buildPdfConfig({ fontName: EMBEDDED_FONT, fontSize: 2, monoComments: true });
+    const plain = buildPdfConfig({ fontName: EMBEDDED_FONT, fontSize: 2 });
+    expect(cfg.fonts?.comment).toMatchObject({ name: 'courier', style: 'normal', size: plain.fonts?.comment?.size });
+    expect(cfg.fonts?.text?.name).toBe(EMBEDDED_FONT);
+  });
+
+  it('is off by default', () => {
+    expect(buildPdfConfig({ fontName: null, fontSize: 0 }).fonts?.comment?.name).not.toBe('courier');
+  });
+});

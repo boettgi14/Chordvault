@@ -1,3 +1,4 @@
+import * as ChordSheetJS from 'chordsheetjs';
 import { PdfFormatter } from 'chordsheetjs/pdf';
 import { PDFDocument } from 'pdf-lib';
 import { prepareSong, resolveEffectivePreferences } from './chords';
@@ -22,14 +23,38 @@ async function loadFontFor(content: string): Promise<PdfFontData | null> {
   }
 }
 
+// Courier is one of the PDF standard fonts: it draws plain ASCII and nothing else.
+const COURIER_SAFE = /^[\x20-\x7e]*$/;
+
+/**
+ * The PDF formatter draws nothing for tab lines (Literal items), so they go in as
+ * comment lines, which it does draw. Comments share one font, so they are set in
+ * Courier to keep the strings lined up, but only when every comment is plain ASCII:
+ * Courier cannot draw anything else, and the song's own font is the safer choice then.
+ */
+export function tabsForPdf(song: ChordSheetJS.Song): { song: ChordSheetJS.Song; monoComments: boolean } {
+  let hasTabs = false;
+  const out = song.mapItems((item) => {
+    if (!(item instanceof ChordSheetJS.Literal)) return item;
+    hasTabs = true;
+    return new ChordSheetJS.Tag('comment', item.string);
+  });
+  if (!hasTabs) return { song, monoComments: false };
+  const comments = out.paragraphs.flatMap((p) => p.lines.flatMap((l) => l.items))
+    .filter((it): it is ChordSheetJS.Tag => it instanceof ChordSheetJS.Tag && it.isComment())
+    .map((tag) => tag.value ?? '');
+  return { song: out, monoComments: comments.every((text) => COURIER_SAFE.test(text)) };
+}
+
 async function renderOne(
   content: string,
   transpose: number,
   nashville: boolean,
   fontSize: number,
 ): Promise<Uint8Array> {
-  const song = prepareSong(content, transpose, nashville);
-  if (!song) throw new Error('Could not parse this song');
+  const prepared = prepareSong(content, transpose, nashville);
+  if (!prepared) throw new Error('Could not parse this song');
+  const { song, monoComments } = tabsForPdf(prepared);
 
   const fontBase64 = await loadFontFor(content);
   const Doc = makePdfConstructor(fontBase64);
@@ -44,13 +69,13 @@ async function renderOne(
   };
   const key = metadata('key');
   const headerText = [metadata('title'), key ? `Key of ${key}` : '', metadata('artist')];
-  const measurement = new PdfFormatter(buildPdfConfig({ fontName, fontSize }));
+  const measurement = new PdfFormatter(buildPdfConfig({ fontName, fontSize, monoComments }));
   measurement.format(forPdf, Doc);
   const measureDoc = measurement.getDocumentWrapper().doc;
 
   let requested: Uint8Array | null = null;
   for (let size = fontSize; ; size--) {
-    const formatter = new PdfFormatter(buildPdfConfig({ fontName, fontSize: size, headerText, doc: measureDoc }));
+    const formatter = new PdfFormatter(buildPdfConfig({ fontName, fontSize: size, headerText, doc: measureDoc, monoComments }));
     formatter.format(forPdf, Doc);
     const wrapper = formatter.getDocumentWrapper();
     const bytes = new Uint8Array(wrapper.doc.output('arraybuffer'));
