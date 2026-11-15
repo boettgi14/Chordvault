@@ -72,19 +72,24 @@
   margin: 8px 0 4px;
 }
 
-/* Tab lines: monospaced and never wrapped, so the strings stay lined up. No scroller of
-   their own, so autoFit sees a tab that is too wide and picks a smaller size or one column. */
-.chord-sheet .literal {
+/* Tabs: monospaced, cut into slices that each hold every string (see tabLayout.ts).
+   A slice that no longer fits moves to the next row as a whole, so the strings stay
+   lined up when a tab wraps, in one column or two. */
+.chord-sheet .tab-block {
   font-family: var(--font-mono);
   font-size: calc(0.86em * var(--font-scale));
   line-height: 1.25;
   color: var(--text);
-  white-space: pre;
-  margin: 0;
+  /* Every slice keeps space below it to separate wrapped rows; the block takes the
+     last row's share back, so a tab that fits on one row adds no extra space. */
+  margin: 0 0 -0.62em;
   /* JetBrains Mono would join "|-" and "-|" into box-drawing glyphs. */
   font-variant-ligatures: none;
   font-feature-settings: "calt" 0, "liga" 0;
 }
+.chord-sheet .tab-block + .tab-block { margin-top: 0.62em; }
+.chord-sheet .tab-slice { display: inline-block; vertical-align: top; margin-bottom: 0.62em; }
+.chord-sheet .tab-line { display: block; white-space: pre; }
 
 /* Section names: readable, neutral, on a hairline to the column edge. */
 .chord-sheet h3.label {

@@ -2,6 +2,7 @@ import * as ChordSheetJS from 'chordsheetjs';
 import { escHtml } from './util';
 import { normalizeKey, normalizeChord } from './keys';
 import { CHORD_TOKEN, TAB_END, TAB_START, cleanChordName } from './chordTokens';
+import { renderTabBlock } from './tabLayout';
 import { extractDirective } from '../../../shared/chordpro.mjs';
 import type { SetlistEntry, SetlistPreferences } from '../types';
 
@@ -16,12 +17,12 @@ const PARSERS = [
 
 const DIRECTIVE_RE = /^\{([a-z_]+):\s*([^}]*)\}$/i;
 const DIRECTIVE_LINE_RE = /^\{[a-z_]+:.*\}$/i;
-const DIRECTIVE_ORDER = ['title', 'artist', 'key', 'tempo', 'capo', 'x_youtube', 'x_tags', 'x_language'];
 // Sections and comments carry a value too ({start_of_verse: Verse 2}, {comment: slowly}),
 // but they belong to the song body and may repeat, so they never count as header metadata.
 const BODY_DIRECTIVE_RE = /^\{(?:start_of_\w+|end_of_\w+|so[cvbtg]|eo[cvbtg]|c|ci|cb|comment\w*|highlight|chorus|image)\b/i;
 /** A metadata line of the song header, such as {title: …}, {key: …} or {x_tags: …}. */
 const isHeaderDirective = (line: string) => DIRECTIVE_LINE_RE.test(line) && !BODY_DIRECTIVE_RE.test(line);
+const DIRECTIVE_ORDER = ['title', 'artist', 'key', 'tempo', 'capo', 'x_youtube', 'x_tags', 'x_language'];
 
 const SECTION_NAMES = 'Verse|Chorus|Bridge|Intro|Outro|Interlude|Pre[- ]?Chorus|Ending|Tag|Coda|Break|Solo|Instrumental|Refrain';
 // Matches a section label with or without surrounding brackets and a trailing colon,
@@ -131,9 +132,9 @@ export function updateDirective(content: string, name: string, value: string | n
   const targetIdx = DIRECTIVE_ORDER.indexOf(name);
   let insertAt = 0;
   for (let i = 0; i < lines.length; i++) {
-    const dm = lines[i].match(DIRECTIVE_RE);
     // The header ends at the first line that is not metadata, such as {start_of_verse: …}.
     if (!isHeaderDirective(lines[i])) break;
+    const dm = lines[i].match(DIRECTIVE_RE);
     if (!dm) {
       insertAt = i + 1;
       continue;
@@ -336,8 +337,34 @@ class ResponsiveHtmlFormatter {
     return song.paragraphs.map(p => this.renderParagraph(p)).join('');
   }
 
+  /**
+   * Lines in order, with each run of tab lines rendered as one block so the block can
+   * wrap as a whole. A blank line inside a tab section starts a new block.
+   */
+  private renderLines(lines: ChordSheetJS.Line[]): string {
+    let html = '';
+    let tab: string[] = [];
+    const flush = () => {
+      if (tab.length) html += renderTabBlock(tab);
+      tab = [];
+    };
+    for (const l of lines) {
+      const literal = literalText(l);
+      if (literal === null) {
+        flush();
+        html += this.renderLine(l);
+      } else if (literal.trim()) {
+        tab.push(literal);
+      } else {
+        flush();
+      }
+    }
+    flush();
+    return html;
+  }
+
   private renderParagraph(p: ChordSheetJS.Paragraph): string {
-    const content = p.lines.map(l => this.renderLine(l)).join('');
+    const content = this.renderLines(p.lines);
     // Promote an untyped paragraph whose first line is a label (helps CSS match)
     const firstLabel = UNTYPED.includes(p.type) ? lineLabel(p.lines[0]) : null;
     const type = firstLabel ? labelType(firstLabel) : p.type;
@@ -354,11 +381,6 @@ class ResponsiveHtmlFormatter {
   }
 
   private renderLine(l: ChordSheetJS.Line): string {
-    // Tab lines keep their exact spacing, so they get a monospaced block of their own
-    // rather than chord/lyric columns.
-    const literal = literalText(l);
-    if (literal !== null) return `<pre class="literal">${escHtml(literal)}</pre>`;
-
     const comment = commentText(l);
     const label = lineLabel(l, comment);
     if (label !== null) return labelRow(label);
@@ -589,6 +611,15 @@ function fitsHorizontally(wrap: Element): boolean {
  * fitting and still read as wrong.
  */
 function wrapsChordLines(output: Element): boolean {
+  // A tab block that wraps still lines up, but reads best in one piece, so Fit treats
+  // it like a wrapped chord line: avoided where a layout without it exists.
+  for (const block of output.querySelectorAll('.tab-block')) {
+    const slices = block.children;
+    if (slices.length < 2) continue;
+    const first = slices[0].getBoundingClientRect().top;
+    const last = slices[slices.length - 1].getBoundingClientRect().top;
+    if (last - first > 1) return true;
+  }
   for (const row of output.querySelectorAll('.row')) {
     if (row.querySelector('.section-label, h3.label')) continue;
     const pairs = [...row.children];

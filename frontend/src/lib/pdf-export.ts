@@ -1,6 +1,8 @@
 import * as ChordSheetJS from 'chordsheetjs';
 import { PdfFormatter } from 'chordsheetjs/pdf';
 import { PDFDocument } from 'pdf-lib';
+import type { jsPDF } from 'jspdf';
+import { sliceTab } from './tabLayout';
 import { prepareSong, resolveEffectivePreferences } from './chords';
 import { entryContent, entrySemitones } from './setlistKeys';
 import { buildPdfConfig } from './pdf-config';
@@ -26,24 +28,105 @@ async function loadFontFor(content: string): Promise<PdfFontData | null> {
 // Courier is one of the PDF standard fonts: it draws plain ASCII and nothing else.
 const COURIER_SAFE = /^[\x20-\x7e]*$/;
 
+/** Verbatim text of a tab line (Literal items), else null. */
+function literalText(line: ChordSheetJS.Line): string | null {
+  if (!line.items.some((it) => it instanceof ChordSheetJS.Literal)) return null;
+  return line.items.map((it) => (it instanceof ChordSheetJS.Literal ? it.string : '')).join('');
+}
+
+const commentLine = (type: string, text: string) =>
+  new ChordSheetJS.Line({ type, items: [new ChordSheetJS.Tag('comment', text)] });
+
+/**
+ * Packs tab slices into rows that fit the column, like the song view wraps them.
+ * A row always takes at least one slice, even one that is too wide on its own.
+ */
+function packRows(slices: string[][], fits: (text: string) => boolean): string[][][] {
+  const rows: string[][][] = [];
+  let row: string[][] = [];
+  const lineOf = (r: string[][], i: number) => r.map((s) => s[i]).join('').replace(/\s+$/, '');
+  for (const slice of slices) {
+    const candidate = [...row, slice];
+    if (row.length && !slice.every((_, i) => fits(lineOf(candidate, i)))) {
+      rows.push(row);
+      row = [slice];
+    } else {
+      row = candidate;
+    }
+  }
+  if (row.length) rows.push(row);
+  return rows;
+}
+
 /**
  * The PDF formatter draws nothing for tab lines (Literal items), so they go in as
- * comment lines, which it does draw. Comments share one font, so they are set in
- * Courier to keep the strings lined up, but only when every comment is plain ASCII:
- * Courier cannot draw anything else, and the song's own font is the safer choice then.
+ * comment lines, which it does draw. A tab wider than the column would wrap each
+ * string on its own there, so every tab block is cut into slices like in the song
+ * view and the slices are packed into rows that fit (`fits`), separated by a blank line.
+ *
+ * Comments share one font, so they are set in Courier to keep the strings lined up,
+ * but only when every comment is plain ASCII: Courier cannot draw anything else, and
+ * the song's own font is the safer choice then.
  */
-export function tabsForPdf(song: ChordSheetJS.Song): { song: ChordSheetJS.Song; monoComments: boolean } {
-  let hasTabs = false;
-  const out = song.mapItems((item) => {
-    if (!(item instanceof ChordSheetJS.Literal)) return item;
-    hasTabs = true;
-    return new ChordSheetJS.Tag('comment', item.string);
-  });
-  if (!hasTabs) return { song, monoComments: false };
-  const comments = out.paragraphs.flatMap((p) => p.lines.flatMap((l) => l.items))
+export function tabsForPdf(
+  song: ChordSheetJS.Song,
+  fits: (text: string) => boolean = () => true,
+): { song: ChordSheetJS.Song; monoComments: boolean } {
+  const tabTexts = song.lines.map(literalText).filter((t): t is string => t !== null);
+  if (!tabTexts.length) return { song, monoComments: false };
+
+  const comments = song.lines
+    .flatMap((l) => l.items)
     .filter((it): it is ChordSheetJS.Tag => it instanceof ChordSheetJS.Tag && it.isComment())
     .map((tag) => tag.value ?? '');
-  return { song: out, monoComments: comments.every((text) => COURIER_SAFE.test(text)) };
+  const monoComments = [...comments, ...tabTexts].every((text) => COURIER_SAFE.test(text));
+
+  const lines: ChordSheetJS.Line[] = [];
+  let run: ChordSheetJS.Line[] = [];
+  const flush = () => {
+    if (!run.length) return;
+    const type = run[0].type;
+    const texts = run.map((l) => (literalText(l) ?? '').replace(/\s+$/, ''));
+    packRows(sliceTab(texts), fits).forEach((row, r) => {
+      if (r) lines.push(commentLine(type, ''));
+      texts.forEach((_, i) => lines.push(commentLine(type, row.map((s) => s[i]).join('').replace(/\s+$/, ''))));
+    });
+    run = [];
+  };
+  for (const line of song.lines) {
+    const text = literalText(line);
+    if (text === null) {
+      flush();
+      lines.push(line);
+    } else if (text.trim()) {
+      run.push(line);
+    } else {
+      flush();
+      lines.push(commentLine(line.type, ''));
+    }
+  }
+  flush();
+
+  const out = song.clone();
+  out.lines = lines;
+  return { song: out, monoComments };
+}
+
+type PdfConfiguration = PdfFormatter['configuration'];
+
+/** Whether a comment line fits one column of the page, measured in the comment font. */
+function commentFits(doc: jsPDF, cfg: PdfConfiguration): (text: string) => boolean {
+  const { margins } = cfg.layout.global;
+  const columnCount = cfg.layout.sections.global.columnCount ?? 1;
+  const columnSpacing = cfg.layout.sections.global.columnSpacing ?? 0;
+  const page = doc.internal.pageSize.getWidth() - margins.left - margins.right;
+  const column = (page - (columnCount - 1) * columnSpacing) / columnCount;
+  const font = cfg.fonts.comment;
+  return (text) => {
+    doc.setFont(font.name, font.style);
+    doc.setFontSize(font.size);
+    return doc.getTextWidth(text) <= column;
+  };
 }
 
 async function renderOne(
@@ -54,7 +137,7 @@ async function renderOne(
 ): Promise<Uint8Array> {
   const prepared = prepareSong(content, transpose, nashville);
   if (!prepared) throw new Error('Could not parse this song');
-  const { song, monoComments } = tabsForPdf(prepared);
+  const { monoComments } = tabsForPdf(prepared);
 
   const fontBase64 = await loadFontFor(content);
   const Doc = makePdfConstructor(fontBase64);
@@ -62,21 +145,23 @@ async function renderOne(
 
   // chordsheetjs and chordsheetjs/pdf each declare their own Song class, so the
   // types don't match across entry points even though it's one object at runtime.
-  const forPdf = song as unknown as Parameters<PdfFormatter['format']>[0];
+  const forPdf = (song: ChordSheetJS.Song) => song as unknown as Parameters<PdfFormatter['format']>[0];
   const metadata = (name: string) => {
-    const value = song.getMetadataValue(name);
+    const value = prepared.getMetadataValue(name);
     return Array.isArray(value) ? value.join(',') : value || '';
   };
   const key = metadata('key');
   const headerText = [metadata('title'), key ? `Key of ${key}` : '', metadata('artist')];
   const measurement = new PdfFormatter(buildPdfConfig({ fontName, fontSize, monoComments }));
-  measurement.format(forPdf, Doc);
+  measurement.format(forPdf(tabsForPdf(prepared).song), Doc);
   const measureDoc = measurement.getDocumentWrapper().doc;
 
   let requested: Uint8Array | null = null;
   for (let size = fontSize; ; size--) {
     const formatter = new PdfFormatter(buildPdfConfig({ fontName, fontSize: size, headerText, doc: measureDoc, monoComments }));
-    formatter.format(forPdf, Doc);
+    // Tabs wrap to the column at this size, so the layout is redone for every size tried.
+    const { song } = tabsForPdf(prepared, commentFits(measureDoc, formatter.configuration));
+    formatter.format(forPdf(song), Doc);
     const wrapper = formatter.getDocumentWrapper();
     const bytes = new Uint8Array(wrapper.doc.output('arraybuffer'));
     requested ??= bytes;

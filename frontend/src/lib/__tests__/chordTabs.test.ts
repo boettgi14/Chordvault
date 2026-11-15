@@ -19,10 +19,26 @@ import { insideTab } from '../chordTokens';
 const TAB = ['e|-----0---3---|', 'B|---1---0-----|', 'G|-2-----------|'];
 const TAB_SONG = `{title: Tab test}\n{key: G}\n\n{start_of_verse}\n[G]Some [C]words\n{end_of_verse}\n\n{start_of_tab}\n${TAB.join('\n')}\n{end_of_tab}`;
 
+// The lines of each rendered tab block, put back together from its slices.
+const tabBlocks = (html: string) => {
+  const root = document.createElement('div');
+  root.innerHTML = html;
+  return [...root.querySelectorAll('.tab-block')].map((block) => {
+    const slices = [...block.querySelectorAll('.tab-slice')].map((s) =>
+      [...s.querySelectorAll('.tab-line')].map((l) => l.textContent ?? ''),
+    );
+    return slices[0].map((_, i) =>
+      slices
+        .map((s) => s[i])
+        .join('')
+        .replace(/\s+$/, ''),
+    );
+  });
+};
+
 describe('renderChordPro tab sections', () => {
-  it('shows every tab line verbatim in a monospaced block', () => {
-    const html = renderChordPro(TAB_SONG);
-    for (const line of TAB) expect(html).toContain(`<pre class="literal">${line}</pre>`);
+  it('shows every tab line verbatim in a tab block', () => {
+    expect(tabBlocks(renderChordPro(TAB_SONG))).toEqual([TAB]);
   });
 
   it('gives the tab section a heading', () => {
@@ -37,30 +53,50 @@ describe('renderChordPro tab sections', () => {
   });
 
   it('accepts the short {sot}/{eot} directives', () => {
-    expect(renderChordPro(`{sot}\n${TAB[1]}\n{eot}`)).toContain(`<pre class="literal">${TAB[1]}</pre>`);
+    expect(tabBlocks(renderChordPro(`{sot}\n${TAB[1]}\n{eot}`))).toEqual([[TAB[1]]]);
   });
 
   it('keeps inner spacing', () => {
     const line = 'e|--0--|    |--3--|';
-    expect(renderChordPro(`{start_of_tab}\n${line}\n{end_of_tab}`)).toContain(`<pre class="literal">${line}</pre>`);
+    expect(tabBlocks(renderChordPro(`{start_of_tab}\n${line}\n{end_of_tab}`))).toEqual([[line]]);
   });
 
   it('escapes tab text', () => {
     const html = renderChordPro('{start_of_tab}\ne|--<b>0</b>--&|\n{end_of_tab}');
-    expect(html).toContain('<pre class="literal">e|--&lt;b&gt;0&lt;/b&gt;--&amp;|</pre>');
     expect(html).not.toContain('<b>0</b>');
+    expect(tabBlocks(html)).toEqual([['e|--<b>0</b>--&|']]);
+  });
+
+  it('starts a new block after a blank line in the tab section', () => {
+    const html = renderChordPro(`{start_of_tab}\n${TAB.join('\n')}\n\n${TAB.join('\n')}\n{end_of_tab}`);
+    expect(tabBlocks(html)).toEqual([TAB, TAB]);
   });
 
   it('leaves tab lines alone when transposing', () => {
     const html = renderChordPro(TAB_SONG, 2);
-    for (const line of TAB) expect(html).toContain(`<pre class="literal">${line}</pre>`);
+    expect(tabBlocks(html)).toEqual([TAB]);
     expect(html).toContain('>A<');
   });
 
   it('leaves tab lines alone in number notation', () => {
     const html = renderChordPro(TAB_SONG, 0, true);
-    for (const line of TAB) expect(html).toContain(`<pre class="literal">${line}</pre>`);
+    expect(tabBlocks(html)).toEqual([TAB]);
     expect(html).toContain('>1<');
+  });
+
+  it('cuts a long tab into slices that hold every string', () => {
+    const long = [
+      'e|-----0---3---|-----0-------|---3---0-----|-------------|',
+      'B|---1---0-----|---0---1---0-|-1---0---1---|---0---------|',
+      'G|-2-----------|-0-----------|-------------|-0-----------|',
+    ];
+    const html = renderChordPro(`{start_of_tab}\n${long.join('\n')}\n{end_of_tab}`);
+    const root = document.createElement('div');
+    root.innerHTML = html;
+    const slices = root.querySelectorAll('.tab-block .tab-slice');
+    expect(slices.length).toBe(4);
+    for (const slice of slices) expect(slice.querySelectorAll('.tab-line').length).toBe(3);
+    expect(tabBlocks(html)).toEqual([long]);
   });
 });
 

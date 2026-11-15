@@ -42,8 +42,7 @@ function textRuns(bytes: Uint8Array) {
     for (const block of s.matchAll(/beginbfrange([\s\S]*?)endbfrange/g))
       for (const p of block[1].matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g)) {
         const [from, to, uni] = [parseInt(p[1], 16), parseInt(p[2], 16), parseInt(p[3], 16)];
-        for (let i = from; i <= to; i++)
-          map[i.toString(16).padStart(4, '0')] = String.fromCodePoint(uni + i - from);
+        for (let i = from; i <= to; i++) map[i.toString(16).padStart(4, '0')] = String.fromCodePoint(uni + i - from);
       }
   }
   return [...streams.join('').matchAll(/BT([\s\S]*?)ET/g)].map((block) => {
@@ -56,15 +55,20 @@ function textRuns(bytes: Uint8Array) {
   });
 }
 
-const textOf = (bytes: Uint8Array) => textRuns(bytes).map((run) => run.text).join('');
+const textOf = (bytes: Uint8Array) =>
+  textRuns(bytes)
+    .map((run) => run.text)
+    .join('');
 
 let capturedBlob: Blob;
 const lastPdf = async () => new Uint8Array(await capturedBlob.arrayBuffer());
 
 beforeAll(() => {
-  vi.stubGlobal('fetch', async (url: string) => new Response(readFileSync(
-    url.includes('Semibold') ? FONT.replace('.ttf', '-Semibold.ttf') : FONT,
-  )));
+  vi.stubGlobal(
+    'fetch',
+    async (url: string) =>
+      new Response(readFileSync(url.includes('Semibold') ? FONT.replace('.ttf', '-Semibold.ttf') : FONT)),
+  );
   // jsdom has no object URLs and won't follow a download, so intercept the blob.
   // Patch the statics only — replacing the whole URL global breaks `new URL()`.
   URL.createObjectURL = (blob: Blob) => {
@@ -179,8 +183,7 @@ const setlist = (entries: SetlistEntry[]): Setlist => ({
 });
 
 // pdf-lib writes compressed object streams, so count pages by reloading it
-const pageCount = async (bytes: Uint8Array) =>
-  (await PDFDocument.load(bytes)).getPageCount();
+const pageCount = async (bytes: Uint8Array) => (await PDFDocument.load(bytes)).getPageCount();
 
 describe('exportSetlistPdf', () => {
   it('merges one page per song', async () => {
@@ -237,7 +240,11 @@ describe('tab sections in PDF exports', () => {
     expect(monoComments).toBe(true);
     const items = out.paragraphs.flatMap((p) => p.lines.flatMap((l) => l.items));
     expect(items.some((it) => it instanceof ChordSheetJS.Literal)).toBe(false);
-    expect(items.filter((it) => it instanceof ChordSheetJS.Tag && it.isComment()).map((it) => (it as ChordSheetJS.Tag).value)).toEqual(TAB);
+    expect(
+      items
+        .filter((it) => it instanceof ChordSheetJS.Tag && it.isComment())
+        .map((it) => (it as ChordSheetJS.Tag).value),
+    ).toEqual(TAB);
   });
 
   it('leaves a song without tabs as it is', () => {
@@ -270,5 +277,55 @@ describe('tab sections in PDF exports', () => {
   it('does not use Courier for a song without tabs', async () => {
     await exportSongPdf(song('{key: G}\n{comment: Slowly}\n[G]Words\n'), opts);
     expect(await usesCourier(await lastPdf())).toBe(false);
+  });
+});
+
+const LONG_TAB = [
+  'e|-----0---3---|-----0-------|---3---0-----|-------------|-----0---3---|-----0-------|',
+  'B|---1---0-----|---0---1---0-|-1---0---1---|---0---------|---1---0-----|---0---1---0-|',
+  'G|-2-----------|-0-----------|-------------|-0-----------|-2-----------|-0-----------|',
+];
+const longTabSong = `{title: Long}\n{key: G}\n[G]Words\n\n{start_of_tab}\n${LONG_TAB.join('\n')}\n{end_of_tab}\n`;
+const tabComments = (song: ChordSheetJS.Song) =>
+  song.lines
+    .flatMap((l) => l.items)
+    .filter((it): it is ChordSheetJS.Tag => it instanceof ChordSheetJS.Tag && it.isComment())
+    .map((t) => t.value ?? '');
+// Put wrapped rows (separated by a blank comment) back together into full lines.
+const unwrap = (comments: string[], strings: number) => {
+  const rows: string[][] = [[]];
+  for (const c of comments) {
+    if (c === '') rows.push([]);
+    else rows[rows.length - 1].push(c);
+  }
+  return Array.from({ length: strings }, (_, i) => rows.map((r) => r[i]).join(''));
+};
+
+describe('wrapping tabs in PDF exports', () => {
+  it('packs a tab into rows that fit, keeping the strings together', () => {
+    const prepared = prepareSong(longTabSong, 0, false)!;
+    const { song: out } = tabsForPdf(prepared, (text) => text.length <= 30);
+    const comments = tabComments(out);
+    for (const c of comments) expect(c.length).toBeLessThanOrEqual(30);
+    expect(comments.filter((c) => c === '').length).toBeGreaterThan(0);
+    expect(unwrap(comments, 3)).toEqual(LONG_TAB);
+  });
+
+  it('keeps a tab that fits on one row', () => {
+    const prepared = prepareSong(longTabSong, 0, false)!;
+    expect(tabComments(tabsForPdf(prepared).song)).toEqual(LONG_TAB);
+  });
+
+  it('wraps a long tab to the PDF column instead of wrapping each string', async () => {
+    await exportSongPdf(song(longTabSong), opts);
+    const lines = courierLines(await lastPdf()).filter((l) => /[-|]/.test(l));
+    // A column is about 40 Courier characters wide at the default size.
+    for (const l of lines) expect(l.length).toBeLessThanOrEqual(42);
+    // Drawn row by row, three strings each: put each string back together.
+    expect(lines.length % 3).toBe(0);
+    expect(lines.length).toBeGreaterThan(3);
+    for (let s = 0; s < 3; s++) {
+      expect(lines.filter((_, i) => i % 3 === s).join('')).toBe(LONG_TAB[s]);
+    }
   });
 });
