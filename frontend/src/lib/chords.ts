@@ -17,6 +17,11 @@ const PARSERS = [
 const DIRECTIVE_RE = /^\{([a-z_]+):\s*([^}]*)\}$/i;
 const DIRECTIVE_LINE_RE = /^\{[a-z_]+:.*\}$/i;
 const DIRECTIVE_ORDER = ['title', 'artist', 'key', 'tempo', 'capo', 'x_youtube', 'x_tags', 'x_language'];
+// Sections and comments carry a value too ({start_of_verse: Verse 2}, {comment: slowly}),
+// but they belong to the song body and may repeat, so they never count as header metadata.
+const BODY_DIRECTIVE_RE = /^\{(?:start_of_\w+|end_of_\w+|so[cvbtg]|eo[cvbtg]|c|ci|cb|comment\w*|highlight|chorus|image)\b/i;
+/** A metadata line of the song header, such as {title: …}, {key: …} or {x_tags: …}. */
+const isHeaderDirective = (line: string) => DIRECTIVE_LINE_RE.test(line) && !BODY_DIRECTIVE_RE.test(line);
 
 const SECTION_NAMES = 'Verse|Chorus|Bridge|Intro|Outro|Interlude|Pre[- ]?Chorus|Ending|Tag|Coda|Break|Solo|Instrumental|Refrain';
 // Matches a section label with or without surrounding brackets and a trailing colon,
@@ -127,15 +132,15 @@ export function updateDirective(content: string, name: string, value: string | n
   let insertAt = 0;
   for (let i = 0; i < lines.length; i++) {
     const dm = lines[i].match(DIRECTIVE_RE);
-    if (dm) {
-      const existingIdx = DIRECTIVE_ORDER.indexOf(dm[1].toLowerCase());
-      if (existingIdx < targetIdx || (existingIdx === -1 && targetIdx === -1)) {
-        insertAt = i + 1;
-      }
-    } else if (DIRECTIVE_LINE_RE.test(lines[i])) {
+    // The header ends at the first line that is not metadata, such as {start_of_verse: …}.
+    if (!isHeaderDirective(lines[i])) break;
+    if (!dm) {
       insertAt = i + 1;
-    } else {
-      break;
+      continue;
+    }
+    const existingIdx = DIRECTIVE_ORDER.indexOf(dm[1].toLowerCase());
+    if (existingIdx < targetIdx || (existingIdx === -1 && targetIdx === -1)) {
+      insertAt = i + 1;
     }
   }
   lines.splice(insertAt, 0, newLine);
@@ -224,7 +229,7 @@ export function toChordPro(content: string): string {
   const directiveLines: string[] = [];
   let bodyStart = 0;
   for (let i = 0; i < lines.length; i++) {
-    if (DIRECTIVE_LINE_RE.test(lines[i].trim())) {
+    if (isHeaderDirective(lines[i].trim())) {
       directiveLines.push(lines[i]);
       bodyStart = i + 1;
     } else if (lines[i].trim() === '') {
